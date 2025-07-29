@@ -21,6 +21,10 @@ This PowerShell script enables administrators to efficiently manage SharePoint O
 - **Site URLs file**: Create a text file listing each SharePoint Online site URL on a separate line at `C:\temp\M365CPI13246019-Sites.txt`
 - Proper permissions to connect to SharePoint Online and modify site settings
 - Microsoft 365 tenant and application (client) IDs
+- Enable Tenant Level settings to Automatic
+
+  <img width="1575" height="606" alt="image" src="https://github.com/user-attachments/assets/6458c57e-5d3d-4d43-a333-f8e6d6df2df6" />
+
 
 ## Setup
 
