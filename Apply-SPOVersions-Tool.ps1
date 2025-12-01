@@ -185,7 +185,7 @@ function Get-FilteredSites {
 Write-LogEntry -LogName $log -LogEntryText "Script execution started. Connecting to tenant admin site: $url" -LogLevel "INFO"
 
 # Connect to the SharePoint Online admin site
-$connection = Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -interactive -returnConnection
+Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -Interactive
 Write-LogEntry -LogName $log -LogEntryText "Successfully connected to admin site" -LogLevel "INFO"
 
 # Load or discover sites based on configuration
@@ -592,10 +592,45 @@ $setManualVersionPolicyOperation = $null
 
 # Function to set tenant-level automatic version settings
 function Set-TenantAutomaticVersionPolicy {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$AdminUrl,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+    
     Write-Host "`n==== Setting Tenant-Level Automatic Version Policy ====" -ForegroundColor Cyan
     Write-LogEntry -LogName $log -LogEntryText "Starting tenant-level automatic version policy configuration" -LogLevel "INFO"
     
     try {
+        # Ensure we're connected to the admin site
+        if ($AdminUrl -and $ClientId -and $TenantId) {
+            try {
+                $currentConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+                $needsReconnect = $true
+                
+                if ($currentConnection) {
+                    # Check if we're connected to the admin URL
+                    if ($currentConnection.Url -eq $AdminUrl) {
+                        $needsReconnect = $false
+                    }
+                }
+                
+                if ($needsReconnect) {
+                    Write-LogEntry -LogName $log -LogEntryText "Reconnecting to admin site: $AdminUrl" -LogLevel "DEBUG"
+                    Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+                }
+            }
+            catch {
+                Write-LogEntry -LogName $log -LogEntryText "Connection check failed, reconnecting: $_" -LogLevel "DEBUG"
+                Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+            }
+        }
+        
         # Set tenant to automatic mode
         Set-PnPTenant -EnableAutoExpirationVersionTrim $true
         
@@ -616,10 +651,45 @@ function Set-TenantAutomaticVersionPolicy {
 
 # Function to review current tenant-level version settings
 function Get-TenantVersionSettings {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$AdminUrl,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+    
     Write-Host "`n==== Retrieving Tenant-Level Version Settings ====" -ForegroundColor Cyan
     Write-LogEntry -LogName $log -LogEntryText "Retrieving tenant-level version settings for review" -LogLevel "INFO"
     
     try {
+        # Ensure we're connected to the admin site
+        if ($AdminUrl -and $ClientId -and $TenantId) {
+            try {
+                $currentConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+                $needsReconnect = $true
+                
+                if ($currentConnection) {
+                    # Check if we're connected to the admin URL
+                    if ($currentConnection.Url -eq $AdminUrl) {
+                        $needsReconnect = $false
+                    }
+                }
+                
+                if ($needsReconnect) {
+                    Write-LogEntry -LogName $log -LogEntryText "Reconnecting to admin site: $AdminUrl" -LogLevel "DEBUG"
+                    Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+                }
+            }
+            catch {
+                Write-LogEntry -LogName $log -LogEntryText "Connection check failed, reconnecting: $_" -LogLevel "DEBUG"
+                Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+            }
+        }
+        
         $tenantConfig = Get-PnPTenant
         
         Write-Host "`n==== Current Tenant Version Settings ====" -ForegroundColor Cyan
@@ -667,6 +737,17 @@ function Get-TenantVersionSettings {
 
 # Function to set tenant-level manual version settings
 function Set-TenantManualVersionPolicy {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string]$AdminUrl,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+    
     Write-Host "`n==== Setting Tenant-Level Manual Version Policy ====" -ForegroundColor Cyan
     Write-LogEntry -LogName $log -LogEntryText "Starting tenant-level manual version policy configuration" -LogLevel "INFO"
     
@@ -674,6 +755,30 @@ function Set-TenantManualVersionPolicy {
     $tenantSettings = Get-ManualVersionSettings
     
     try {
+        # Ensure we're connected to the admin site
+        if ($AdminUrl -and $ClientId -and $TenantId) {
+            try {
+                $currentConnection = Get-PnPConnection -ErrorAction SilentlyContinue
+                $needsReconnect = $true
+                
+                if ($currentConnection) {
+                    # Check if we're connected to the admin URL
+                    if ($currentConnection.Url -eq $AdminUrl) {
+                        $needsReconnect = $false
+                    }
+                }
+                
+                if ($needsReconnect) {
+                    Write-LogEntry -LogName $log -LogEntryText "Reconnecting to admin site: $AdminUrl" -LogLevel "DEBUG"
+                    Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+                }
+            }
+            catch {
+                Write-LogEntry -LogName $log -LogEntryText "Connection check failed, reconnecting: $_" -LogLevel "DEBUG"
+                Connect-PnPOnline -Url $AdminUrl -ClientId $ClientId -Tenant $TenantId -Interactive | Out-Null
+            }
+        }
+        
         # Build parameters for Set-PnPTenant
         $params = @{
             EnableAutoExpirationVersionTrim = $false
@@ -1141,7 +1246,7 @@ function Start-OperationsMenu {
                 Write-Host "Running: Set tenant to automatic version trimming" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Set tenant to automatic version trimming" -LogLevel "INFO"
                 
-                $result = Set-TenantAutomaticVersionPolicy
+                $result = Set-TenantAutomaticVersionPolicy -AdminUrl $url -ClientId $clientId -TenantId $tenantId
                 
                 if ($result) {
                     Write-Host "`nOperation completed successfully!" -ForegroundColor Green
@@ -1155,7 +1260,7 @@ function Start-OperationsMenu {
                 Write-Host "Running: Set tenant to manual version limits" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Set tenant to manual version limits" -LogLevel "INFO"
                 
-                $result = Set-TenantManualVersionPolicy
+                $result = Set-TenantManualVersionPolicy -AdminUrl $url -ClientId $clientId -TenantId $tenantId
                 
                 if ($result) {
                     Write-Host "`nOperation completed successfully!" -ForegroundColor Green
@@ -1169,7 +1274,7 @@ function Start-OperationsMenu {
                 Write-Host "Running: Review current tenant level version settings" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Review tenant version settings" -LogLevel "INFO"
                 
-                $result = Get-TenantVersionSettings
+                $result = Get-TenantVersionSettings -AdminUrl $url -ClientId $clientId -TenantId $tenantId
                 
                 if (-not $result) {
                     Write-Host "`nFailed to retrieve settings. Check the log for details." -ForegroundColor Red
