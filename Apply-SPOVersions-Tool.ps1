@@ -185,7 +185,7 @@ function Get-FilteredSites {
 Write-LogEntry -LogName $log -LogEntryText "Script execution started. Connecting to tenant admin site: $url" -LogLevel "INFO"
 
 # Connect to the SharePoint Online admin site
-$connnecton = Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -interactive -returnConnection
+$connection = Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -interactive -returnConnection
 Write-LogEntry -LogName $log -LogEntryText "Successfully connected to admin site" -LogLevel "INFO"
 
 # Load or discover sites based on configuration
@@ -770,7 +770,7 @@ function Start-OperationsMenu {
             "1" {
                 Write-Host "Running: Get current version policy" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Get current version policy" -LogLevel "INFO"
-                Invoke-SiteBatch -SiteUrls $sites -Operation $getVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "get version policy"
+                Invoke-SiteBatch -SiteUrls $sites -Operation $getVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "get version policy"
                 Read-Host "Press Enter to return to menu"
             }
             "2" {
@@ -794,7 +794,7 @@ function Start-OperationsMenu {
                     # Automatic mode
                     Write-Host "`nSetting automatic version trimming for all sites..." -ForegroundColor Cyan
                     Write-LogEntry -LogName $log -LogEntryText "User selected automatic version trimming" -LogLevel "INFO"
-                    Invoke-SiteBatch -SiteUrls $sites -Operation $setVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "set automatic version policy"
+                    Invoke-SiteBatch -SiteUrls $sites -Operation $setVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "set automatic version policy"
                 }
                 else {
                     # Manual mode - ask for settings source
@@ -897,7 +897,7 @@ function Start-OperationsMenu {
                     }
                     
                     # Execute the batch operation
-                    Invoke-SiteBatch -SiteUrls $sites -Operation $setManualVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "set manual version policy"
+                    Invoke-SiteBatch -SiteUrls $sites -Operation $setManualVersionPolicyOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "set manual version policy"
                 }
                 
                 Read-Host "Press Enter to return to menu"
@@ -905,7 +905,7 @@ function Start-OperationsMenu {
             "3" {
                 Write-Host "Running: Get version policy status" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Get version policy status" -LogLevel "INFO"
-                Invoke-SiteBatch -SiteUrls $sites -Operation $getVersionPolicyStatusOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "get version policy status"
+                Invoke-SiteBatch -SiteUrls $sites -Operation $getVersionPolicyStatusOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "get version policy status"
                 Read-Host "Press Enter to return to menu"
             }
             "4" {
@@ -970,7 +970,7 @@ function Start-OperationsMenu {
                         }
                         
                         Write-Host "`nCreating automatic batch delete jobs for all sites..." -ForegroundColor Cyan
-                        Invoke-SiteBatch -SiteUrls $sites -Operation $createBatchDeleteJobOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "create automatic batch delete job"
+                        Invoke-SiteBatch -SiteUrls $sites -Operation $createBatchDeleteJobOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "create automatic batch delete job"
                     }
                     catch {
                         $errorMsg = "Failed to retrieve tenant settings: $_"
@@ -1126,7 +1126,7 @@ function Start-OperationsMenu {
                     }
                     
                     # Execute the batch operation
-                    Invoke-SiteBatch -SiteUrls $sites -Operation $createManualBatchDeleteJobOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "create manual batch delete job"
+                    Invoke-SiteBatch -SiteUrls $sites -Operation $createManualBatchDeleteJobOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "create manual batch delete job"
                 }
                 
                 Read-Host "Press Enter to return to menu"
@@ -1134,7 +1134,7 @@ function Start-OperationsMenu {
             "5" {
                 Write-Host "Running: Get batch delete job status" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Get batch delete job status" -LogLevel "INFO"
-                Invoke-SiteBatch -SiteUrls $sites -Operation $getBatchDeleteJobStatusOperation -ClientId $clientId -TenantId $tenantId -Connection $connnecton -OperationDescription "get batch delete job status"
+                Invoke-SiteBatch -SiteUrls $sites -Operation $getBatchDeleteJobStatusOperation -ClientId $clientId -TenantId $tenantId -Connection $connection -OperationDescription "get batch delete job status"
                 Read-Host "Press Enter to return to menu"
             }
             "6" {
