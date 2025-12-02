@@ -186,6 +186,7 @@ Write-LogEntry -LogName $log -LogEntryText "Script execution started. Connecting
 
 # Connect to the SharePoint Online admin site
 Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -Interactive
+$connection = Get-PnPConnection
 Write-LogEntry -LogName $log -LogEntryText "Successfully connected to admin site" -LogLevel "INFO"
 
 # Load or discover sites based on configuration
