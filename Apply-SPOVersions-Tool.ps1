@@ -30,6 +30,7 @@
 .NOTES
     Authors: Mike Lee /Luis DuSolier
     Date: 11/24/25
+    Updated: 7/31/26 - added Version report generation and  What-If analysis and CSV export functionality
 
     File Name      : Apply-SPOVersions-Tool.ps1
     Prerequisites  : 
