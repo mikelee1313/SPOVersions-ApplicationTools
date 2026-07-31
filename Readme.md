@@ -36,6 +36,7 @@ SharePoint Online version history can consume significant storage over time. Thi
 
 The script is entirely interactive — no parameters need to be passed at the command line. All configuration is done inside the script file itself.
 
+See:  https://learn.microsoft.com/en-us/sharepoint/plan-version-storage
 ---
 
 ## Prerequisites
