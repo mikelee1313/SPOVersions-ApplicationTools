@@ -1,7 +1,3 @@
-Here is a carefully crafted README file for your repository, based on the content and structure of Configure-SPOVersionsforAutomatic.ps1:
-
----
-
 # Configure-SPOVersionsforAutomatic
 
 This PowerShell script enables administrators to efficiently manage SharePoint Online site version policies and file version management across multiple sites, as defined in a text file. It provides a menu-driven interface for both querying and updating versioning policies, automating cleanup jobs, and monitoring storage usage.
@@ -80,5 +76,3 @@ Follow the menu prompts to perform the desired operation across all specified si
 The sample script is provided **AS IS** without warranty of any kind. Microsoft and the authors disclaim all implied warranties, including but not limited to merchantability or fitness for a particular purpose. Use at your own risk.
 
 ---
-
-Let me know if you want to further tailor this README (e.g., for company-specific branding or additional instructions)!
