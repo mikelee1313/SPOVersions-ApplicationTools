@@ -65,7 +65,22 @@
 # Initialize logging
 $date = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 $log = "$env:TEMP\" + 'configure_versions_SPO' + $date + '_' + "logfile.log"
-$Debug = $true
+$EnableDebugLogging = $true
+
+# Require PowerShell 5.1 or later
+if ($PSVersionTable.PSVersion.Major -lt 5 -or
+    ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
+    Write-Host "ERROR: This script requires PowerShell 5.1 or later." -ForegroundColor Red
+    Write-Host "  Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Red
+    exit
+}
+
+# Verify PnP.PowerShell is installed
+if (-not (Get-Module -ListAvailable -Name 'PnP.PowerShell')) {
+    Write-Host "ERROR: The PnP.PowerShell module is not installed." -ForegroundColor Red
+    Write-Host "  Install it by running:  Install-Module PnP.PowerShell -Scope CurrentUser" -ForegroundColor Yellow
+    exit
+}
 
 # This is the logging function
 Function Write-LogEntry {
@@ -74,9 +89,9 @@ Function Write-LogEntry {
         [string] $LogEntryText,
         [string] $LogLevel = "INFO"  # Default log level is INFO
     )
-    if ($LogName -ne $null) {
-        # Skip DEBUG level messages if Debug is set to False
-        if ($LogLevel -eq "DEBUG" -and $Debug -eq $False) {
+    if ($null -ne $LogName) {
+        # Skip DEBUG level messages when debug logging is disabled
+        if ($LogLevel -eq "DEBUG" -and $EnableDebugLogging -eq $false) {
             return
         }
         
@@ -106,7 +121,7 @@ $url = "https://m365cpi13246019-admin.sharepoint.com"
 #   - OneDrive sites target personal sites only
 
 #$sitesFilePath = "C:\temp\M365CPI13246019-Sites.txt"  # Set to $null to auto-discover all sites
-$sitesFilePath = @() # Set to $null to auto-discover all sites
+$sitesFilePath = $null # Set to $null to auto-discover all sites
 
 #################section####################
 ############################################
@@ -155,7 +170,7 @@ function Get-FilteredSites {
                 $_.Url -notlike '*-my.sharepoint.com/personal/*'
             }
             
-            $siteUrls = $allSites | Select-Object -ExpandProperty Url
+            $siteUrls = @($allSites | Select-Object -ExpandProperty Url)
             Write-Host "Found $($siteUrls.Count) SharePoint sites" -ForegroundColor Green
             Write-LogEntry -LogName $log -LogEntryText "Found $($siteUrls.Count) SharePoint sites" -LogLevel "INFO"
         }
@@ -166,7 +181,7 @@ function Get-FilteredSites {
             
             $allSites = Get-PnPTenantSite -IncludeOneDriveSites -Filter "Url -like '-my.sharepoint.com/personal/'"
             
-            $siteUrls = $allSites | Select-Object -ExpandProperty Url
+            $siteUrls = @($allSites | Select-Object -ExpandProperty Url)
             Write-Host "Found $($siteUrls.Count) OneDrive sites" -ForegroundColor Green
             Write-LogEntry -LogName $log -LogEntryText "Found $($siteUrls.Count) OneDrive sites" -LogLevel "INFO"
         }
@@ -186,9 +201,18 @@ function Get-FilteredSites {
 Write-LogEntry -LogName $log -LogEntryText "Script execution started. Connecting to tenant admin site: $url" -LogLevel "INFO"
 
 # Connect to the SharePoint Online admin site
-Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -Interactive
-$connection = Get-PnPConnection
-Write-LogEntry -LogName $log -LogEntryText "Successfully connected to admin site" -LogLevel "INFO"
+try {
+    Connect-PnPOnline -Url $url -ClientId $clientId -Tenant $tenantId -Interactive
+    $connection = Get-PnPConnection
+    Write-LogEntry -LogName $log -LogEntryText "Successfully connected to admin site" -LogLevel "INFO"
+}
+catch {
+    Write-Host "ERROR: Failed to connect to the SharePoint admin center." -ForegroundColor Red
+    Write-Host "  URL    : $url" -ForegroundColor Red
+    Write-Host "  Detail : $_" -ForegroundColor Red
+    Write-LogEntry -LogName $log -LogEntryText "Failed to connect to admin site: $_" -LogLevel "ERROR"
+    exit
+}
 
 # Load or discover sites based on configuration
 $sites = $null
@@ -196,7 +220,14 @@ $sites = $null
 if ($null -ne $sitesFilePath -and $sitesFilePath -ne "") {
     # Load sites from file
     if (Test-Path $sitesFilePath) {
-        $sites = Get-Content -Path $sitesFilePath
+        # Filter blank and whitespace-only lines so stray newlines in the file don't create empty site URLs
+        $sites = @(Get-Content -Path $sitesFilePath | Where-Object { $_.Trim() -ne '' })
+        if ($sites.Count -eq 0) {
+            Write-Host "WARNING: Site list file exists but contains no valid URLs: $sitesFilePath" -ForegroundColor Yellow
+            Write-LogEntry -LogName $log -LogEntryText "Site list file is empty: $sitesFilePath" -LogLevel "WARNING"
+            Write-Host "`nExiting script..." -ForegroundColor Red
+            exit
+        }
         Write-Host "Loaded $($sites.Count) sites from file: $sitesFilePath" -ForegroundColor Green
         Write-LogEntry -LogName $log -LogEntryText "Reading site list from: $sitesFilePath" -LogLevel "INFO"
         Write-LogEntry -LogName $log -LogEntryText "Found $($sites.Count) sites to process" -LogLevel "INFO"
@@ -260,8 +291,12 @@ function Invoke-WithThrottlingHandling {
             Write-LogEntry -LogName $log -LogEntryText "Successfully executed command for site: $SiteUrl" -LogLevel "INFO"
         }
         catch {
-            if ($_.Exception.Response.StatusCode -eq 429 -or $_.Exception.Response.StatusCode -eq 503) {
-                $retryAfter = $_.Exception.Response.Headers["Retry-After"]
+            # Guard against exceptions that don't expose .Response (e.g. CSOM, network errors)
+            $statusCode = $null
+            try { $statusCode = $_.Exception.Response.StatusCode } catch { }
+            if ($statusCode -eq 429 -or $statusCode -eq 503) {
+                $retryAfter = $null
+                try { $retryAfter = $_.Exception.Response.Headers["Retry-After"] } catch { }
                 if (-not $retryAfter) {
                     $retryAfter = $InitialRetrySeconds * [math]::Pow(2, $retryCount)
                 }
@@ -270,7 +305,7 @@ function Invoke-WithThrottlingHandling {
                 $warningMsg = "Throttling detected for site $SiteUrl. Waiting for $retryAfter seconds before retry $retryCount of $MaxRetries..."
                 Write-Warning $warningMsg
                 Write-LogEntry -LogName $log -LogEntryText $warningMsg -LogLevel "WARNING"
-                Start-Sleep -Seconds $retryAfter
+                Start-Sleep -Seconds ([int][math]::Ceiling($retryAfter))
             }
             else {
                 $errorMsg = "Error processing site $SiteUrl : $_"
