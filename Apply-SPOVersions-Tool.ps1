@@ -104,8 +104,8 @@ $url = "https://m365cpi13246019-admin.sharepoint.com"
 #   - SharePoint sites exclude system sites (search centers, app catalog, etc.)
 #   - OneDrive sites target personal sites only
 
-$sitesFilePath = "C:\temp\M365CPI13246019-Sites.txt"  # Set to $null to auto-discover all sites
-#$sitesFilePath = $null # Set to $null to auto-discover all sites
+#$sitesFilePath = "C:\temp\M365CPI13246019-Sites.txt"  # Set to $null to auto-discover all sites
+$sitesFilePath = @() # Set to $null to auto-discover all sites
 
 #################section####################
 ############################################
@@ -826,6 +826,497 @@ function Set-TenantManualVersionPolicy {
     }
 }
 
+# Function to generate version expiration reports for all site collections
+function New-TenantVersionExpirationReport {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string[]]$SiteUrls,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+    
+    Write-Host "`n==== Generate Version History Report for All Site Collections ====" -ForegroundColor Cyan
+    Write-LogEntry -LogName $log -LogEntryText "Starting version expiration report generation for all sites" -LogLevel "INFO"
+    
+    Write-Host "`nReports will be saved to the 'Admin_SiteCollection_VersionReport_DONOTDELETE' library in each site collection." -ForegroundColor Yellow
+    Write-Host "Filename: {SiteCollectionName}site_adminreport_donotdelete_VersionReport.csv" -ForegroundColor Yellow
+    Write-LogEntry -LogName $log -LogEntryText "Report destination: Admin_SiteCollection_VersionReport_DONOTDELETE library in each site collection" -LogLevel "INFO"
+    
+    # Constant for the dedicated report library name
+    $reportLibraryName = "Admin_SiteCollection_VersionReport_DONOTDELETE"
+    
+    # Resolve site list if not provided (auto-discovery mode)
+    if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) {
+        Write-Host "`nNo sites loaded. Starting site discovery..." -ForegroundColor Yellow
+        $scopeChoice = Get-SiteScope
+        if ($scopeChoice -eq "3") {
+            Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+            return
+        }
+        $SiteUrls = Get-FilteredSites -Scope $scopeChoice
+        if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) {
+            Write-Host "No sites found or discovery failed. Operation cancelled." -ForegroundColor Red
+            return
+        }
+        $confirm = Read-Host "`nReady to process $($SiteUrls.Count) sites. Proceed? (Y/N)"
+        if ($confirm -ne "Y" -and $confirm -ne "y") {
+            Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+            return
+        }
+    }
+    
+    Write-Host "`nStarting report generation for $($SiteUrls.Count) sites..." -ForegroundColor Yellow
+    Write-LogEntry -LogName $log -LogEntryText "Starting report generation for $($SiteUrls.Count) sites" -LogLevel "INFO"
+    
+    foreach ($siteUrl in $SiteUrls) {
+        $cleanUrl = $siteUrl.TrimEnd('/')
+        Write-Host "`nProcessing site: $cleanUrl" -ForegroundColor Cyan
+        Write-LogEntry -LogName $log -LogEntryText "Processing report for site: $cleanUrl" -LogLevel "INFO"
+        
+        try {
+            $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
+
+            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+
+            # Create the dedicated report library if it doesn't already exist
+            $reportLib = Get-PnPList -Identity $reportLibraryName -ErrorAction SilentlyContinue
+            if ($null -eq $reportLib) {
+                Write-Host "  - Creating report library: $reportLibraryName" -ForegroundColor Cyan
+                New-PnPList -Title $reportLibraryName -Template DocumentLibrary -ErrorAction Stop | Out-Null
+                Write-LogEntry -LogName $log -LogEntryText "Created report library '$reportLibraryName' on $cleanUrl" -LogLevel "INFO"
+            }
+            else {
+                Write-Host "  - Report library already exists: $reportLibraryName" -ForegroundColor Cyan
+            }
+
+            $reportFileName = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
+            $fullReportUrl  = "$cleanUrl/$reportLibraryName/$reportFileName"
+
+            Write-Host "  - Submitting version expiration report job" -ForegroundColor Cyan
+            Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
+            Write-LogEntry -LogName $log -LogEntryText "Submitting report job. ReportUrl: $fullReportUrl" -LogLevel "INFO"
+
+            New-PnPSiteFileVersionExpirationReportJob -ReportUrl $fullReportUrl
+
+            Write-Host "  - Report job submitted successfully: $reportFileName" -ForegroundColor Green
+            Write-LogEntry -LogName $log -LogEntryText "Report job submitted for site: $cleanUrl, Filename: $reportFileName" -LogLevel "INFO"
+        }
+        catch {
+            $errorMsg = "Failed to submit report job for $cleanUrl : $_"
+            Write-Error $errorMsg
+            Write-Host $_.Exception.ToString() -ForegroundColor Red
+            Write-LogEntry -LogName $log -LogEntryText $errorMsg -LogLevel "ERROR"
+        }
+    }
+    
+    Write-Host "`nReport generation completed for all sites." -ForegroundColor Green
+    Write-LogEntry -LogName $log -LogEntryText "Completed report generation for all sites" -LogLevel "INFO"
+}
+
+# Function to check version expiration report job status for all site collections
+function Get-TenantVersionExpirationReportStatus {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string[]]$SiteUrls,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+
+    Write-Host "`n==== Get Version History Report Job Status for All Site Collections ====" -ForegroundColor Cyan
+    Write-LogEntry -LogName $log -LogEntryText "Starting version expiration report status check for all sites" -LogLevel "INFO"
+
+    # Resolve site list if not provided (auto-discovery mode)
+    if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) {
+        Write-Host "`nNo sites loaded. Starting site discovery..." -ForegroundColor Yellow
+        $scopeChoice = Get-SiteScope
+        if ($scopeChoice -eq "3") {
+            Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+            return
+        }
+        $SiteUrls = Get-FilteredSites -Scope $scopeChoice
+        if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) {
+            Write-Host "No sites found or discovery failed. Operation cancelled." -ForegroundColor Red
+            return
+        }
+        $confirm = Read-Host "`nReady to process $($SiteUrls.Count) sites. Proceed? (Y/N)"
+        if ($confirm -ne "Y" -and $confirm -ne "y") {
+            Write-Host "Operation cancelled by user." -ForegroundColor Yellow
+            return
+        }
+    }
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($siteUrl in $SiteUrls) {
+        $cleanUrl = $siteUrl.TrimEnd('/')
+        Write-Host "`nProcessing site: $cleanUrl" -ForegroundColor Cyan
+        Write-LogEntry -LogName $log -LogEntryText "Checking report status for site: $cleanUrl" -LogLevel "INFO"
+
+        try {
+            $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
+            $reportFileName     = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
+            $reportLibraryName  = "Admin_SiteCollection_VersionReport_DONOTDELETE"
+            $fullReportUrl      = "$cleanUrl/$reportLibraryName/$reportFileName"
+
+            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+
+            Write-Host "  - Checking report job status" -ForegroundColor Cyan
+            Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
+
+            $status = Get-PnPLibraryFileVersionExpirationReportJobStatus -Identity $reportLibraryName -ReportUrl $fullReportUrl
+
+            $statusValue = $status.Status
+            $errorMsg    = $status.ErrorMessage
+
+            switch ($statusValue) {
+                "completed"  { Write-Host "  - Status: Completed" -ForegroundColor Green }
+                "failed"     { Write-Host "  - Status: Failed - $errorMsg" -ForegroundColor Red }
+                default      { Write-Host "  - Status: $statusValue" -ForegroundColor Yellow }
+            }
+
+            $results.Add([PSCustomObject]@{
+                SiteUrl      = $cleanUrl
+                Status       = $statusValue
+                ErrorMessage = $errorMsg
+            })
+
+            Write-LogEntry -LogName $log -LogEntryText "Report status for $cleanUrl : $statusValue $(if ($errorMsg) { "- $errorMsg" })" -LogLevel "INFO"
+        }
+        catch {
+            $errText = "Failed to get report status for $cleanUrl : $_"
+            Write-Error $errText
+            Write-Host $_.Exception.ToString() -ForegroundColor Red
+            Write-LogEntry -LogName $log -LogEntryText $errText -LogLevel "ERROR"
+            $results.Add([PSCustomObject]@{
+                SiteUrl      = $cleanUrl
+                Status       = "error"
+                ErrorMessage = $_.ToString()
+            })
+        }
+    }
+
+    # Summary
+    $completed = ($results | Where-Object { $_.Status -eq "completed" }).Count
+    $failed    = ($results | Where-Object { $_.Status -eq "failed" }).Count
+    $errors    = ($results | Where-Object { $_.Status -eq "error" }).Count
+    $other     = $results.Count - $completed - $failed - $errors
+
+    Write-Host "`n==== Report Status Summary ====" -ForegroundColor Cyan
+    Write-Host "  Total sites processed : $($results.Count)" -ForegroundColor White
+    Write-Host "  Completed             : $completed" -ForegroundColor Green
+    if ($failed -gt 0) {
+        Write-Host "  Failed                : $failed" -ForegroundColor Red
+        Write-Host "`n  Failed sites:" -ForegroundColor Red
+        $results | Where-Object { $_.Status -eq "failed" } | ForEach-Object {
+            Write-Host "    - $($_.SiteUrl)" -ForegroundColor Red
+            Write-Host "      $($_.ErrorMessage)" -ForegroundColor DarkRed
+        }
+    }
+    if ($errors -gt 0) {
+        Write-Host "  Errors (cmdlet)       : $errors" -ForegroundColor Red
+    }
+    if ($other -gt 0) {
+        Write-Host "  Other/In-Progress     : $other" -ForegroundColor Yellow
+        $results | Where-Object { $_.Status -notin @("completed","failed","error") } | ForEach-Object {
+            Write-Host "    - $($_.SiteUrl) : $($_.Status)" -ForegroundColor Yellow
+        }
+    }
+
+    Write-LogEntry -LogName $log -LogEntryText "Report status summary: Total=$($results.Count), Completed=$completed, Failed=$failed, Errors=$errors, Other=$other" -LogLevel "INFO"
+}
+
+# Helper: applies a What-If policy to a downloaded CSV and returns storage impact metrics
+function Get-WhatIfStorageAnalysis {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$CsvPath,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet("Automatic", "ExpireAfter", "CountLimit")]
+        [string]$Mode,
+        [double]$ExpireAfterDays = 0,
+        [int]$MajorVersionLimit  = 0
+    )
+
+    $report = Import-Csv -Path $CsvPath
+    if ($report.Count -eq 0) {
+        return @{ TotalVersions = 0; VersionsToDelete = 0; StorageFreedBytes = 0
+                  StorageFreedMB = 0; StorageFreedGB = 0; TotalVersionStorageMB = 0; PercentFreed = 0 }
+    }
+
+    # Expand compact columns — the CSV omits repeated values for the same file to save space
+    $prevWebId = ""; $prevDocId = ""; $prevWebUrl = ""; $prevFileUrl = ""
+    $prevModUser = ""; $prevModName = ""
+    foreach ($row in $report) {
+        if (![string]::IsNullOrEmpty($row."WebId.Compact"))                 { $prevWebId   = $row."WebId.Compact" }                  else { $row."WebId.Compact"                  = $prevWebId }
+        if (![string]::IsNullOrEmpty($row."DocId.Compact"))                 { $prevDocId   = $row."DocId.Compact" }                  else { $row."DocId.Compact"                  = $prevDocId }
+        if (![string]::IsNullOrEmpty($row."WebUrl.Compact"))                { $prevWebUrl  = $row."WebUrl.Compact" }                 else { $row."WebUrl.Compact"                 = $prevWebUrl }
+        if (![string]::IsNullOrEmpty($row."FileUrl.Compact"))               { $prevFileUrl = $row."FileUrl.Compact" }                else { $row."FileUrl.Compact"                = $prevFileUrl }
+        if (![string]::IsNullOrEmpty($row."ModifiedBy_UserId.Compact"))     { $prevModUser = $row."ModifiedBy_UserId.Compact" }      else { $row."ModifiedBy_UserId.Compact"      = $prevModUser }
+        if (![string]::IsNullOrEmpty($row."ModifiedBy_DisplayName.Compact")){ $prevModName = $row."ModifiedBy_DisplayName.Compact" } else { $row."ModifiedBy_DisplayName.Compact" = $prevModName }
+    }
+
+    switch ($Mode) {
+        "Automatic" {
+            foreach ($row in $report) {
+                $row.TargetExpirationDate = $row.AutomaticPolicyExpirationDate
+            }
+        }
+        "ExpireAfter" {
+            foreach ($row in $report) {
+                if (![string]::IsNullOrEmpty($row.SnapshotDate)) {
+                    try {
+                        $snap = [DateTime]::Parse($row.SnapshotDate)
+                        $row.TargetExpirationDate = $snap.AddDays($ExpireAfterDays).ToString("yyyy-MM-ddTHH:mm:ssK")
+                    } catch { }
+                }
+            }
+        }
+        "CountLimit" {
+            # Group versions per file, sort descending by version number, mark excess as expired
+            $fileGroups = $report | Group-Object -Property "DocId.Compact"
+            foreach ($group in $fileGroups) {
+                $sorted = $group.Group | Sort-Object { [int]$_.MajorVersion * 512 + [int]$_.MinorVersion } -Descending
+                $majorCount = 0
+                foreach ($v in $sorted) {
+                    if ($majorCount -ge $MajorVersionLimit) {
+                        $v.TargetExpirationDate = "2000-01-01T00:00:00Z"
+                    }
+                    if ([int]$v.MinorVersion -eq 0) { $majorCount++ }
+                }
+            }
+        }
+    }
+
+    $toDelete = $report | Where-Object { ![string]::IsNullOrEmpty($_.TargetExpirationDate) }
+
+    $storageFreedBytes = [long]0
+    $totalStorageBytes = [long]0
+    foreach ($v in $report) {
+        $sz = [long]0
+        if (![string]::IsNullOrEmpty($v.Size) -and [long]::TryParse($v.Size, [ref]$sz)) {
+            $totalStorageBytes += $sz
+        }
+    }
+    foreach ($v in $toDelete) {
+        $sz = [long]0
+        if (![string]::IsNullOrEmpty($v.Size) -and [long]::TryParse($v.Size, [ref]$sz)) {
+            $storageFreedBytes += $sz
+        }
+    }
+
+    return @{
+        TotalVersions         = $report.Count
+        VersionsToDelete      = $toDelete.Count
+        StorageFreedBytes     = $storageFreedBytes
+        StorageFreedMB        = [math]::Round($storageFreedBytes / 1MB, 2)
+        StorageFreedGB        = [math]::Round($storageFreedBytes / 1GB, 3)
+        TotalVersionStorageMB = [math]::Round($totalStorageBytes / 1MB, 2)
+        PercentFreed          = if ($totalStorageBytes -gt 0) { [math]::Round(($storageFreedBytes / $totalStorageBytes) * 100, 1) } else { 0 }
+    }
+}
+
+# Function to run What-If analysis across all site collections
+function Invoke-TenantVersionWhatIfAnalysis {
+    param (
+        [Parameter(Mandatory = $false)]
+        [string[]]$SiteUrls,
+        [Parameter(Mandatory = $false)]
+        [string]$ClientId,
+        [Parameter(Mandatory = $false)]
+        [string]$TenantId
+    )
+
+    Write-Host "`n==== Version Policy What-If Analysis ====" -ForegroundColor Cyan
+    Write-Host "Downloads version reports from each site and calculates how much storage" -ForegroundColor Yellow
+    Write-Host "would be recovered under the selected version policy." -ForegroundColor Yellow
+    Write-LogEntry -LogName $log -LogEntryText "Starting What-If analysis" -LogLevel "INFO"
+
+    # Resolve site list
+    if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) {
+        Write-Host "`nNo sites loaded. Starting site discovery..." -ForegroundColor Yellow
+        $scopeChoice = Get-SiteScope
+        if ($scopeChoice -eq "3") { Write-Host "Operation cancelled by user." -ForegroundColor Yellow; return }
+        $SiteUrls = Get-FilteredSites -Scope $scopeChoice
+        if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) { Write-Host "No sites found. Operation cancelled." -ForegroundColor Red; return }
+        $confirm = Read-Host "`nReady to process $($SiteUrls.Count) sites. Proceed? (Y/N)"
+        if ($confirm -ne "Y" -and $confirm -ne "y") { Write-Host "Operation cancelled by user." -ForegroundColor Yellow; return }
+    }
+
+    # Choose policy mode
+    Write-Host "`n==== Select Version Policy to Analyze ====" -ForegroundColor Cyan
+    Write-Host "1: Automatic version trimming (uses AutomaticPolicyExpirationDate from report)"
+    Write-Host "2: Manual - Expire versions older than X days"
+    Write-Host "3: Manual - Keep only N most recent major versions"
+
+    $modeChoice = $null
+    do {
+        $modeChoice = Read-Host "Select policy (1-3)"
+        if ($modeChoice -notin @("1", "2", "3")) { Write-Host "Invalid selection. Please choose 1, 2, or 3." -ForegroundColor Red }
+    } while ($modeChoice -notin @("1", "2", "3"))
+
+    $analysisMode      = ""
+    $expireAfterDays   = [double]0
+    $majorVersionLimit = [int]0
+    $policyDescription = ""
+
+    switch ($modeChoice) {
+        "1" {
+            $analysisMode      = "Automatic"
+            $policyDescription = "Automatic version trimming"
+        }
+        "2" {
+            $analysisMode = "ExpireAfter"
+            do {
+                $daysInput = Read-Host "Enter number of days — versions older than this will be deleted (minimum 30)"
+                $validDays = [double]::TryParse($daysInput, [ref]$expireAfterDays)
+                if (-not $validDays -or $expireAfterDays -lt 30) { Write-Host "Please enter a number of 30 or greater." -ForegroundColor Red }
+            } while (-not $validDays -or $expireAfterDays -lt 30)
+            $policyDescription = "Manual expiration: versions older than $expireAfterDays days"
+        }
+        "3" {
+            $analysisMode = "CountLimit"
+            do {
+                $countInput = Read-Host "Enter the number of most recent major versions to KEEP (minimum 1)"
+                $validCount = [int]::TryParse($countInput, [ref]$majorVersionLimit)
+                if (-not $validCount -or $majorVersionLimit -lt 1) { Write-Host "Please enter a positive integer." -ForegroundColor Red }
+            } while (-not $validCount -or $majorVersionLimit -lt 1)
+            $policyDescription = "Manual count limit: keep $majorVersionLimit most recent major versions"
+        }
+    }
+
+    Write-Host "`nPolicy selected: $policyDescription" -ForegroundColor Green
+    Write-LogEntry -LogName $log -LogEntryText "What-If mode: $analysisMode | Policy: $policyDescription" -LogLevel "INFO"
+
+    # Create timestamped temp directory
+    $tempDir = Join-Path $env:TEMP "SPO_WhatIf_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+    New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+    Write-Host "Downloading reports to: $tempDir" -ForegroundColor Cyan
+    Write-LogEntry -LogName $log -LogEntryText "Temp directory: $tempDir" -LogLevel "INFO"
+
+    $reportLibraryName = "Admin_SiteCollection_VersionReport_DONOTDELETE"
+    $siteResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    foreach ($siteUrl in $SiteUrls) {
+        $cleanUrl = $siteUrl.TrimEnd('/')
+        Write-Host "`nProcessing: $cleanUrl" -ForegroundColor Cyan
+
+        $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
+        $reportFileName = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
+        $localCsvPath   = Join-Path $tempDir $reportFileName
+
+        try {
+            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+
+            # Verify report file exists before attempting download
+            $reportFile = Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -ErrorAction SilentlyContinue
+            if ($null -eq $reportFile) {
+                Write-Host "  - Report not found. Run option 9 first to generate reports." -ForegroundColor Yellow
+                Write-LogEntry -LogName $log -LogEntryText "Report not found for $cleanUrl — skipping" -LogLevel "WARNING"
+                continue
+            }
+
+            Write-Host "  - Downloading report..." -ForegroundColor Cyan
+            Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -Path $tempDir -Filename $reportFileName -AsFile -Force
+
+            Write-Host "  - Applying What-If analysis ($policyDescription)..." -ForegroundColor Cyan
+            $analysis = Get-WhatIfStorageAnalysis -CsvPath $localCsvPath -Mode $analysisMode `
+                -ExpireAfterDays $expireAfterDays -MajorVersionLimit $majorVersionLimit
+
+            Write-Host "  - Versions in report  : $($analysis.TotalVersions)" -ForegroundColor White
+            Write-Host "  - Versions to delete  : $($analysis.VersionsToDelete)" -ForegroundColor Yellow
+            Write-Host "  - Version storage used: $($analysis.TotalVersionStorageMB) MB" -ForegroundColor White
+            Write-Host "  - Storage to recover  : $($analysis.StorageFreedMB) MB ($($analysis.StorageFreedGB) GB)" -ForegroundColor Green
+            Write-Host "  - % storage recovered : $($analysis.PercentFreed)%" -ForegroundColor Green
+
+            $siteResults.Add([PSCustomObject]@{
+                SiteUrl               = $cleanUrl
+                TotalVersions         = $analysis.TotalVersions
+                VersionsToDelete      = $analysis.VersionsToDelete
+                TotalVersionStorageMB = $analysis.TotalVersionStorageMB
+                StorageFreedMB        = $analysis.StorageFreedMB
+                StorageFreedGB        = $analysis.StorageFreedGB
+                PercentFreed          = $analysis.PercentFreed
+            })
+
+            Write-LogEntry -LogName $log -LogEntryText "What-If for $cleanUrl : Versions=$($analysis.TotalVersions), ToDelete=$($analysis.VersionsToDelete), TotalStorageMB=$($analysis.TotalVersionStorageMB), FreedMB=$($analysis.StorageFreedMB), Percent=$($analysis.PercentFreed)%" -LogLevel "INFO"
+        }
+        catch {
+            $errMsg = "Failed What-If analysis for $cleanUrl : $_"
+            Write-Error $errMsg
+            Write-Host $_.Exception.ToString() -ForegroundColor Red
+            Write-LogEntry -LogName $log -LogEntryText $errMsg -LogLevel "ERROR"
+        }
+    }
+
+    # Aggregate summary
+    if ($siteResults.Count -gt 0) {
+        $totalVersions         = ($siteResults | Measure-Object -Property TotalVersions         -Sum).Sum
+        $totalToDelete         = ($siteResults | Measure-Object -Property VersionsToDelete       -Sum).Sum
+        $totalVersionStorageMB = [math]::Round(($siteResults | Measure-Object -Property TotalVersionStorageMB -Sum).Sum, 2)
+        $totalFreedMB          = [math]::Round(($siteResults | Measure-Object -Property StorageFreedMB        -Sum).Sum, 2)
+        $totalFreedGB          = [math]::Round($totalFreedMB / 1024, 3)
+        $overallPct            = if ($totalVersionStorageMB -gt 0) { [math]::Round(($totalFreedMB / $totalVersionStorageMB) * 100, 1) } else { 0 }
+
+        Write-Host "`n==== What-If Analysis Summary ====" -ForegroundColor Cyan
+        Write-Host "  Policy analyzed         : $policyDescription" -ForegroundColor White
+        Write-Host "  Sites analyzed          : $($siteResults.Count)" -ForegroundColor White
+        Write-Host "  Total versions          : $totalVersions" -ForegroundColor White
+        Write-Host "  Versions to delete      : $totalToDelete" -ForegroundColor Yellow
+        Write-Host "  Total version storage   : $totalVersionStorageMB MB" -ForegroundColor White
+        Write-Host "  Total storage to recover: $totalFreedMB MB  ($totalFreedGB GB)" -ForegroundColor Green
+        Write-Host "  Overall % recovered     : $overallPct%" -ForegroundColor Green
+
+        Write-Host "`n  Per-site breakdown (sorted by storage freed):" -ForegroundColor Cyan
+        $siteResults | Sort-Object StorageFreedMB -Descending | ForEach-Object {
+            Write-Host ("    {0,-55} {1,8} MB freed  ({2}%)" -f $_.SiteUrl, $_.StorageFreedMB, $_.PercentFreed) -ForegroundColor White
+        }
+
+        # Export results to CSV
+        $safePolicyName  = $policyDescription -replace '[\\/:*?"<>|]', '_'
+        $csvExportPath   = Join-Path $env:TEMP "SPO_WhatIf_Results_${safePolicyName}_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+
+        $exportRows = $siteResults | Sort-Object StorageFreedMB -Descending |
+            Select-Object SiteUrl, TotalVersions, VersionsToDelete,
+                          TotalVersionStorageMB, StorageFreedMB, StorageFreedGB, PercentFreed
+
+        # Append a totals row
+        $totalsRow = [PSCustomObject]@{
+            SiteUrl               = "TOTAL ($($siteResults.Count) sites)"
+            TotalVersions         = $totalVersions
+            VersionsToDelete      = $totalToDelete
+            TotalVersionStorageMB = $totalVersionStorageMB
+            StorageFreedMB        = $totalFreedMB
+            StorageFreedGB        = $totalFreedGB
+            PercentFreed          = $overallPct
+        }
+        $exportRows + $totalsRow | Export-Csv -Path $csvExportPath -NoTypeInformation
+
+        Write-Host "`n  Results exported to: $csvExportPath" -ForegroundColor Green
+        Write-LogEntry -LogName $log -LogEntryText "What-If summary: Policy=$policyDescription, Sites=$($siteResults.Count), TotalVersions=$totalVersions, ToDelete=$totalToDelete, TotalStorageMB=$totalVersionStorageMB, FreedMB=$totalFreedMB, FreedGB=$totalFreedGB, Percent=$overallPct%" -LogLevel "INFO"
+        Write-LogEntry -LogName $log -LogEntryText "What-If results exported to: $csvExportPath" -LogLevel "INFO"
+    }
+
+    # Offer to keep or clean up temp files
+    $keepFiles = Read-Host "`nKeep downloaded report files at '$tempDir'? (Y/N)"
+    if ($keepFiles -ne "Y" -and $keepFiles -ne "y") {
+        Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "Temporary files removed." -ForegroundColor Cyan
+        Write-LogEntry -LogName $log -LogEntryText "What-If temp files removed: $tempDir" -LogLevel "INFO"
+    }
+    else {
+        Write-Host "Files retained at: $tempDir" -ForegroundColor Cyan
+        Write-LogEntry -LogName $log -LogEntryText "What-If temp files retained at: $tempDir" -LogLevel "INFO"
+    }
+}
+
 # Display menu and get user selection
 function Show-OperationMenu {
     Clear-Host
@@ -855,11 +1346,14 @@ function Show-OperationMenu {
     Write-Host "6: Set tenant to automatic version trimming"
     Write-Host "7: Set tenant to manual version limits"
     Write-Host "8: Review current tenant level version settings"
+    Write-Host "9: Generate version history report for all sites"
+    Write-Host "10: Get version history report job status for all sites"
+    Write-Host "11: What-If analysis - estimate storage recovery by version policy"
     Write-Host ""
     Write-Host "Q: Quit"
     Write-Host "====================================================" -ForegroundColor Cyan
     
-    $selection = Read-Host "Please select an operation (1-8, or Q to quit)"
+    $selection = Read-Host "Please select an operation (1-11, or Q to quit)"
     Write-LogEntry -LogName $log -LogEntryText "User selected menu option: $selection" -LogLevel "INFO"
     return $selection
 }
@@ -1280,6 +1774,30 @@ function Start-OperationsMenu {
                 if (-not $result) {
                     Write-Host "`nFailed to retrieve settings. Check the log for details." -ForegroundColor Red
                 }
+                Read-Host "Press Enter to return to menu"
+            }
+            "9" {
+                Write-Host "Running: Generate version history report for all sites" -ForegroundColor Yellow
+                Write-LogEntry -LogName $log -LogEntryText "Starting operation: Generate version expiration report for all sites" -LogLevel "INFO"
+                
+                New-TenantVersionExpirationReport -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
+                
+                Read-Host "Press Enter to return to menu"
+            }
+            "10" {
+                Write-Host "Running: Get version history report job status for all sites" -ForegroundColor Yellow
+                Write-LogEntry -LogName $log -LogEntryText "Starting operation: Get version expiration report job status for all sites" -LogLevel "INFO"
+                
+                Get-TenantVersionExpirationReportStatus -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
+                
+                Read-Host "Press Enter to return to menu"
+            }
+            "11" {
+                Write-Host "Running: What-If analysis - estimate storage recovery by version policy" -ForegroundColor Yellow
+                Write-LogEntry -LogName $log -LogEntryText "Starting operation: What-If analysis" -LogLevel "INFO"
+                
+                Invoke-TenantVersionWhatIfAnalysis -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
+                
                 Read-Host "Press Enter to return to menu"
             }
             "Q" {
