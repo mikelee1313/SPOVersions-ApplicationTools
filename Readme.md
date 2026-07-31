@@ -170,6 +170,10 @@ Applies a version policy to every site collection using `Set-PnPSiteVersionPolic
   - **Major version limit** (minimum 100) — maximum number of major versions to retain.
   - **Expire after days** — optionally expire versions older than a specified number of days (minimum 30), or never.
 
+
+The following image depicts the restore options and the storage use for each setting:
+<img width="3748" height="1845" alt="image" src="https://github.com/user-attachments/assets/e9efce2e-6516-4f2f-b366-9745fd6238be" />
+
   Settings can be sourced from current **tenant-level defaults** or entered as custom values.
 
 #### Option 3 — Get Version Policy Status
