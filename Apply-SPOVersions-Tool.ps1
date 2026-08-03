@@ -162,6 +162,7 @@ function Get-FilteredSites {
             
             $allSites = Get-PnPTenantSite | Where-Object {
                 $_.Template -ne 'RedirectSite#0' -and
+                $_.ArchiveStatus -eq "NotArchived" -and
                 $_.Template -notlike 'SRCHCEN*' -and
                 $_.Template -notlike 'SRCHCENTERLITE*' -and
                 $_.Template -notlike 'SPSMSITEHOST*' -and
@@ -321,6 +322,43 @@ function Invoke-WithThrottlingHandling {
         $errorMsg = "Failed to execute command for $SiteUrl after $MaxRetries retries."
         Write-Error $errorMsg
         Write-LogEntry -LogName $log -LogEntryText $errorMsg -LogLevel "ERROR"
+    }
+}
+
+# Lightweight retry wrapper that returns the scriptblock result; used by tenant-level and per-site loop functions
+function Invoke-PnPWithRetry {
+    param (
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+        [string]$OperationDescription = "operation",
+        [int]$MaxRetries = 5,
+        [int]$InitialRetrySeconds = 30
+    )
+
+    $retryCount = 0
+    while ($true) {
+        try {
+            return (& $ScriptBlock)
+        }
+        catch {
+            $statusCode = $null
+            try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+            if (($statusCode -eq 429 -or $statusCode -eq 503) -and $retryCount -lt $MaxRetries) {
+                $retryAfter = $null
+                try { $retryAfter = $_.Exception.Response.Headers["Retry-After"] } catch { }
+                if (-not $retryAfter) {
+                    $retryAfter = $InitialRetrySeconds * [math]::Pow(2, $retryCount)
+                }
+                $retryCount++
+                $msg = "Throttling detected ($OperationDescription). Waiting $([int][math]::Ceiling($retryAfter))s before retry $retryCount/$MaxRetries..."
+                Write-Warning $msg
+                Write-LogEntry -LogName $log -LogEntryText $msg -LogLevel "WARNING"
+                Start-Sleep -Seconds ([int][math]::Ceiling($retryAfter))
+            }
+            else {
+                throw $_
+            }
+        }
     }
 }
 
@@ -669,7 +707,9 @@ function Set-TenantAutomaticVersionPolicy {
         }
         
         # Set tenant to automatic mode
-        Set-PnPTenant -EnableAutoExpirationVersionTrim $true
+        Invoke-PnPWithRetry -OperationDescription "set tenant automatic version policy" -ScriptBlock {
+            Set-PnPTenant -EnableAutoExpirationVersionTrim $true
+        }
         
         Write-Host "Successfully set tenant to Automatic version trimming mode" -ForegroundColor Green
         Write-Host "New sites will automatically optimize storage using an intelligent algorithm." -ForegroundColor Green
@@ -727,7 +767,9 @@ function Get-TenantVersionSettings {
             }
         }
         
-        $tenantConfig = Get-PnPTenant
+        $tenantConfig = Invoke-PnPWithRetry -OperationDescription "get tenant version settings" -ScriptBlock {
+            Get-PnPTenant
+        }
         
         Write-Host "`n==== Current Tenant Version Settings ====" -ForegroundColor Cyan
         Write-Host ""
@@ -843,7 +885,9 @@ function Set-TenantManualVersionPolicy {
         }
         
         # Set tenant manual version policy
-        Set-PnPTenant @params
+        Invoke-PnPWithRetry -OperationDescription "set tenant manual version policy" -ScriptBlock ({
+            Set-PnPTenant @params
+        }.GetNewClosure())
         
         Write-Host "`nSuccessfully set tenant to Manual version limits mode" -ForegroundColor Green
         Write-Host "  Major Version Limit: $($tenantSettings.MajorVersionLimit)" -ForegroundColor Green
@@ -913,39 +957,67 @@ function New-TenantVersionExpirationReport {
         Write-Host "`nProcessing site: $cleanUrl" -ForegroundColor Cyan
         Write-LogEntry -LogName $log -LogEntryText "Processing report for site: $cleanUrl" -LogLevel "INFO"
         
-        try {
-            $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
+        $siteRetry = 0
+        $siteDone = $false
+        while (-not $siteDone) {
+            try {
+                $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
 
-            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+                Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
 
-            # Create the dedicated report library if it doesn't already exist
-            $reportLib = Get-PnPList -Identity $reportLibraryName -ErrorAction SilentlyContinue
-            if ($null -eq $reportLib) {
-                Write-Host "  - Creating report library: $reportLibraryName" -ForegroundColor Cyan
-                New-PnPList -Title $reportLibraryName -Template DocumentLibrary -ErrorAction Stop | Out-Null
-                Write-LogEntry -LogName $log -LogEntryText "Created report library '$reportLibraryName' on $cleanUrl" -LogLevel "INFO"
+                # Create the dedicated report library if it doesn't already exist
+                $reportLib = Get-PnPList -Identity $reportLibraryName -ErrorAction SilentlyContinue
+                if ($null -eq $reportLib) {
+                    Write-Host "  - Creating report library: $reportLibraryName" -ForegroundColor Cyan
+                    New-PnPList -Title $reportLibraryName -Template DocumentLibrary -ErrorAction Stop | Out-Null
+                    Write-LogEntry -LogName $log -LogEntryText "Created report library '$reportLibraryName' on $cleanUrl" -LogLevel "INFO"
+                }
+                else {
+                    Write-Host "  - Report library already exists: $reportLibraryName" -ForegroundColor Cyan
+                }
+
+                $reportFileName = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
+                $fullReportUrl  = "$cleanUrl/$reportLibraryName/$reportFileName"
+
+                # Delete existing report file so the job can be resubmitted without error
+                $existingReport = Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -ErrorAction SilentlyContinue
+                if ($null -ne $existingReport) {
+                    Write-Host "  - Existing report found — deleting before resubmitting" -ForegroundColor Yellow
+                    Write-LogEntry -LogName $log -LogEntryText "Deleting existing report file before resubmit: $fullReportUrl" -LogLevel "INFO"
+                    Remove-PnPFile -SiteRelativeUrl "/$reportLibraryName/$reportFileName" -Force -ErrorAction Stop
+                }
+
+                Write-Host "  - Submitting version expiration report job" -ForegroundColor Cyan
+                Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
+                Write-LogEntry -LogName $log -LogEntryText "Submitting report job. ReportUrl: $fullReportUrl" -LogLevel "INFO"
+
+                New-PnPSiteFileVersionExpirationReportJob -ReportUrl $fullReportUrl
+
+                Write-Host "  - Report job submitted successfully: $reportFileName" -ForegroundColor Green
+                Write-LogEntry -LogName $log -LogEntryText "Report job submitted for site: $cleanUrl, Filename: $reportFileName" -LogLevel "INFO"
+                $siteDone = $true
             }
-            else {
-                Write-Host "  - Report library already exists: $reportLibraryName" -ForegroundColor Cyan
+            catch {
+                $statusCode = $null
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if (($statusCode -eq 429 -or $statusCode -eq 503) -and $siteRetry -lt 5) {
+                    $retryAfter = $null
+                    try { $retryAfter = $_.Exception.Response.Headers["Retry-After"] } catch { }
+                    if (-not $retryAfter) { $retryAfter = 30 * [math]::Pow(2, $siteRetry) }
+                    $siteRetry++
+                    $msg = "Throttling detected for $cleanUrl. Waiting $([int][math]::Ceiling($retryAfter))s before retry $siteRetry/5..."
+                    Write-Warning $msg
+                    Write-LogEntry -LogName $log -LogEntryText $msg -LogLevel "WARNING"
+                    Start-Sleep -Seconds ([int][math]::Ceiling($retryAfter))
+                }
+                else {
+                    $errorMsg = "Failed to submit report job for $cleanUrl : $_"
+                    Write-Error $errorMsg
+                    Write-Host $_.Exception.ToString() -ForegroundColor Red
+                    Write-LogEntry -LogName $log -LogEntryText $errorMsg -LogLevel "ERROR"
+                    $siteDone = $true
+                }
             }
-
-            $reportFileName = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
-            $fullReportUrl  = "$cleanUrl/$reportLibraryName/$reportFileName"
-
-            Write-Host "  - Submitting version expiration report job" -ForegroundColor Cyan
-            Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
-            Write-LogEntry -LogName $log -LogEntryText "Submitting report job. ReportUrl: $fullReportUrl" -LogLevel "INFO"
-
-            New-PnPSiteFileVersionExpirationReportJob -ReportUrl $fullReportUrl
-
-            Write-Host "  - Report job submitted successfully: $reportFileName" -ForegroundColor Green
-            Write-LogEntry -LogName $log -LogEntryText "Report job submitted for site: $cleanUrl, Filename: $reportFileName" -LogLevel "INFO"
-        }
-        catch {
-            $errorMsg = "Failed to submit report job for $cleanUrl : $_"
-            Write-Error $errorMsg
-            Write-Host $_.Exception.ToString() -ForegroundColor Red
-            Write-LogEntry -LogName $log -LogEntryText $errorMsg -LogLevel "ERROR"
         }
     }
     
@@ -996,46 +1068,66 @@ function Get-TenantVersionExpirationReportStatus {
         Write-Host "`nProcessing site: $cleanUrl" -ForegroundColor Cyan
         Write-LogEntry -LogName $log -LogEntryText "Checking report status for site: $cleanUrl" -LogLevel "INFO"
 
-        try {
-            $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
-            $reportFileName     = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
-            $reportLibraryName  = "Admin_SiteCollection_VersionReport_DONOTDELETE"
-            $fullReportUrl      = "$cleanUrl/$reportLibraryName/$reportFileName"
+        $siteRetry = 0
+        $siteDone = $false
+        while (-not $siteDone) {
+            try {
+                $siteCollectionName = ($cleanUrl -split '/') | Where-Object { $_ -ne '' } | Select-Object -Last 1
+                $reportFileName     = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
+                $reportLibraryName  = "Admin_SiteCollection_VersionReport_DONOTDELETE"
+                $fullReportUrl      = "$cleanUrl/$reportLibraryName/$reportFileName"
 
-            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+                Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
 
-            Write-Host "  - Checking report job status" -ForegroundColor Cyan
-            Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
+                Write-Host "  - Checking report job status" -ForegroundColor Cyan
+                Write-Host "    Report URL: $fullReportUrl" -ForegroundColor Cyan
 
-            $status = Get-PnPLibraryFileVersionExpirationReportJobStatus -Identity $reportLibraryName -ReportUrl $fullReportUrl
+                $status = Get-PnPSiteFileVersionExpirationReportJobStatus -ReportUrl $fullReportUrl
 
-            $statusValue = $status.Status
-            $errorMsg    = $status.ErrorMessage
+                $statusValue = $status.Status
+                $errorMsg    = $status.ErrorMessage
 
-            switch ($statusValue) {
-                "completed"  { Write-Host "  - Status: Completed" -ForegroundColor Green }
-                "failed"     { Write-Host "  - Status: Failed - $errorMsg" -ForegroundColor Red }
-                default      { Write-Host "  - Status: $statusValue" -ForegroundColor Yellow }
+                switch ($statusValue) {
+                    "completed"  { Write-Host "  - Status: Completed" -ForegroundColor Green }
+                    "failed"     { Write-Host "  - Status: Failed - $errorMsg" -ForegroundColor Red }
+                    default      { Write-Host "  - Status: $statusValue" -ForegroundColor Yellow }
+                }
+
+                $results.Add([PSCustomObject]@{
+                    SiteUrl      = $cleanUrl
+                    Status       = $statusValue
+                    ErrorMessage = $errorMsg
+                })
+
+                Write-LogEntry -LogName $log -LogEntryText "Report status for $cleanUrl : $statusValue $(if ($errorMsg) { "- $errorMsg" })" -LogLevel "INFO"
+                $siteDone = $true
             }
-
-            $results.Add([PSCustomObject]@{
-                SiteUrl      = $cleanUrl
-                Status       = $statusValue
-                ErrorMessage = $errorMsg
-            })
-
-            Write-LogEntry -LogName $log -LogEntryText "Report status for $cleanUrl : $statusValue $(if ($errorMsg) { "- $errorMsg" })" -LogLevel "INFO"
-        }
-        catch {
-            $errText = "Failed to get report status for $cleanUrl : $_"
-            Write-Error $errText
-            Write-Host $_.Exception.ToString() -ForegroundColor Red
-            Write-LogEntry -LogName $log -LogEntryText $errText -LogLevel "ERROR"
-            $results.Add([PSCustomObject]@{
-                SiteUrl      = $cleanUrl
-                Status       = "error"
-                ErrorMessage = $_.ToString()
-            })
+            catch {
+                $statusCode = $null
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if (($statusCode -eq 429 -or $statusCode -eq 503) -and $siteRetry -lt 5) {
+                    $retryAfter = $null
+                    try { $retryAfter = $_.Exception.Response.Headers["Retry-After"] } catch { }
+                    if (-not $retryAfter) { $retryAfter = 30 * [math]::Pow(2, $siteRetry) }
+                    $siteRetry++
+                    $msg = "Throttling detected for $cleanUrl. Waiting $([int][math]::Ceiling($retryAfter))s before retry $siteRetry/5..."
+                    Write-Warning $msg
+                    Write-LogEntry -LogName $log -LogEntryText $msg -LogLevel "WARNING"
+                    Start-Sleep -Seconds ([int][math]::Ceiling($retryAfter))
+                }
+                else {
+                    $errText = "Failed to get report status for $cleanUrl : $_"
+                    Write-Error $errText
+                    Write-Host $_.Exception.ToString() -ForegroundColor Red
+                    Write-LogEntry -LogName $log -LogEntryText $errText -LogLevel "ERROR"
+                    $results.Add([PSCustomObject]@{
+                        SiteUrl      = $cleanUrl
+                        Status       = "error"
+                        ErrorMessage = $_.ToString()
+                    })
+                    $siteDone = $true
+                }
+            }
         }
     }
 
@@ -1248,47 +1340,67 @@ function Invoke-TenantVersionWhatIfAnalysis {
         $reportFileName = "${siteCollectionName}site_adminreport_donotdelete_VersionReport.csv"
         $localCsvPath   = Join-Path $tempDir $reportFileName
 
-        try {
-            Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
+        $siteRetry = 0
+        $siteDone = $false
+        while (-not $siteDone) {
+            try {
+                Connect-PnPOnline -Url $cleanUrl -ClientId $ClientId -Tenant $TenantId -Interactive
 
-            # Verify report file exists before attempting download
-            $reportFile = Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -ErrorAction SilentlyContinue
-            if ($null -eq $reportFile) {
-                Write-Host "  - Report not found. Run option 9 first to generate reports." -ForegroundColor Yellow
-                Write-LogEntry -LogName $log -LogEntryText "Report not found for $cleanUrl — skipping" -LogLevel "WARNING"
-                continue
+                # Verify report file exists before attempting download
+                $reportFile = Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -ErrorAction SilentlyContinue
+                if ($null -eq $reportFile) {
+                    Write-Host "  - Report not found. Run option 9 first to generate reports." -ForegroundColor Yellow
+                    Write-LogEntry -LogName $log -LogEntryText "Report not found for $cleanUrl — skipping" -LogLevel "WARNING"
+                    break
+                }
+
+                Write-Host "  - Downloading report..." -ForegroundColor Cyan
+                Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -Path $tempDir -Filename $reportFileName -AsFile -Force
+
+                Write-Host "  - Applying What-If analysis ($policyDescription)..." -ForegroundColor Cyan
+                $analysis = Get-WhatIfStorageAnalysis -CsvPath $localCsvPath -Mode $analysisMode `
+                    -ExpireAfterDays $expireAfterDays -MajorVersionLimit $majorVersionLimit
+
+                Write-Host "  - Versions in report  : $($analysis.TotalVersions)" -ForegroundColor White
+                Write-Host "  - Versions to delete  : $($analysis.VersionsToDelete)" -ForegroundColor Yellow
+                Write-Host "  - Version storage used: $($analysis.TotalVersionStorageMB) MB" -ForegroundColor White
+                Write-Host "  - Storage to recover  : $($analysis.StorageFreedMB) MB ($($analysis.StorageFreedGB) GB)" -ForegroundColor Green
+                Write-Host "  - % storage recovered : $($analysis.PercentFreed)%" -ForegroundColor Green
+
+                $siteResults.Add([PSCustomObject]@{
+                    SiteUrl               = $cleanUrl
+                    TotalVersions         = $analysis.TotalVersions
+                    VersionsToDelete      = $analysis.VersionsToDelete
+                    TotalVersionStorageMB = $analysis.TotalVersionStorageMB
+                    StorageFreedMB        = $analysis.StorageFreedMB
+                    StorageFreedGB        = $analysis.StorageFreedGB
+                    PercentFreed          = $analysis.PercentFreed
+                })
+
+                Write-LogEntry -LogName $log -LogEntryText "What-If for $cleanUrl : Versions=$($analysis.TotalVersions), ToDelete=$($analysis.VersionsToDelete), TotalStorageMB=$($analysis.TotalVersionStorageMB), FreedMB=$($analysis.StorageFreedMB), Percent=$($analysis.PercentFreed)%" -LogLevel "INFO"
+                $siteDone = $true
             }
-
-            Write-Host "  - Downloading report..." -ForegroundColor Cyan
-            Get-PnPFile -Url "/$reportLibraryName/$reportFileName" -Path $tempDir -Filename $reportFileName -AsFile -Force
-
-            Write-Host "  - Applying What-If analysis ($policyDescription)..." -ForegroundColor Cyan
-            $analysis = Get-WhatIfStorageAnalysis -CsvPath $localCsvPath -Mode $analysisMode `
-                -ExpireAfterDays $expireAfterDays -MajorVersionLimit $majorVersionLimit
-
-            Write-Host "  - Versions in report  : $($analysis.TotalVersions)" -ForegroundColor White
-            Write-Host "  - Versions to delete  : $($analysis.VersionsToDelete)" -ForegroundColor Yellow
-            Write-Host "  - Version storage used: $($analysis.TotalVersionStorageMB) MB" -ForegroundColor White
-            Write-Host "  - Storage to recover  : $($analysis.StorageFreedMB) MB ($($analysis.StorageFreedGB) GB)" -ForegroundColor Green
-            Write-Host "  - % storage recovered : $($analysis.PercentFreed)%" -ForegroundColor Green
-
-            $siteResults.Add([PSCustomObject]@{
-                SiteUrl               = $cleanUrl
-                TotalVersions         = $analysis.TotalVersions
-                VersionsToDelete      = $analysis.VersionsToDelete
-                TotalVersionStorageMB = $analysis.TotalVersionStorageMB
-                StorageFreedMB        = $analysis.StorageFreedMB
-                StorageFreedGB        = $analysis.StorageFreedGB
-                PercentFreed          = $analysis.PercentFreed
-            })
-
-            Write-LogEntry -LogName $log -LogEntryText "What-If for $cleanUrl : Versions=$($analysis.TotalVersions), ToDelete=$($analysis.VersionsToDelete), TotalStorageMB=$($analysis.TotalVersionStorageMB), FreedMB=$($analysis.StorageFreedMB), Percent=$($analysis.PercentFreed)%" -LogLevel "INFO"
-        }
-        catch {
-            $errMsg = "Failed What-If analysis for $cleanUrl : $_"
-            Write-Error $errMsg
-            Write-Host $_.Exception.ToString() -ForegroundColor Red
-            Write-LogEntry -LogName $log -LogEntryText $errMsg -LogLevel "ERROR"
+            catch {
+                $statusCode = $null
+                try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+                if (($statusCode -eq 429 -or $statusCode -eq 503) -and $siteRetry -lt 5) {
+                    $retryAfter = $null
+                    try { $retryAfter = $_.Exception.Response.Headers["Retry-After"] } catch { }
+                    if (-not $retryAfter) { $retryAfter = 30 * [math]::Pow(2, $siteRetry) }
+                    $siteRetry++
+                    $msg = "Throttling detected for $cleanUrl. Waiting $([int][math]::Ceiling($retryAfter))s before retry $siteRetry/5..."
+                    Write-Warning $msg
+                    Write-LogEntry -LogName $log -LogEntryText $msg -LogLevel "WARNING"
+                    Start-Sleep -Seconds ([int][math]::Ceiling($retryAfter))
+                }
+                else {
+                    $errMsg = "Failed What-If analysis for $cleanUrl : $_"
+                    Write-Error $errMsg
+                    Write-Host $_.Exception.ToString() -ForegroundColor Red
+                    Write-LogEntry -LogName $log -LogEntryText $errMsg -LogLevel "ERROR"
+                    $siteDone = $true
+                }
+            }
         }
     }
 
