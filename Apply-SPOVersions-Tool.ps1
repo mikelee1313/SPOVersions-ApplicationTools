@@ -32,6 +32,8 @@
     Date: 11/24/25
     Updated: 7/31/26 - added Version report generation and  What-If analysis and CSV export functionality
     Updated: 8/3/26 - Fixed bug where checking version report was calling the library and not site, fixed 3 functions to use throttle handling.
+    Updated: 8/6/26 - Added site size filter using $MinSiteSizeforversionReports for version report generation and What-If analysis, added logging for 
+        skipped sites due to size filter, added logging for sites included without size metadata.
 
     File Name      : Apply-SPOVersions-Tool.ps1
     Prerequisites  : 
@@ -124,6 +126,10 @@ $url = "https://m365cpi13246019-admin.sharepoint.com"
 #$sitesFilePath = "C:\temp\M365CPI13246019-Sites.txt"  # Set to $null to auto-discover all sites
 $sitesFilePath = $null # Set to $null to auto-discover all sites
 
+# Version report scope configuration
+# StorageUsageCurrent is reported in MB. Set to 0 to include all sites in report generation and What-If analysis.
+$MinSiteSizeforversionReports = 100
+
 #################section####################
 ############################################
 
@@ -196,6 +202,80 @@ function Get-FilteredSites {
         Write-Host $_.Exception.ToString() -ForegroundColor Red
         Write-LogEntry -LogName $log -LogEntryText $errorMsg -LogLevel "ERROR"
         return $null
+    }
+}
+
+# Function to filter sites for version report-related operations by current site size
+function Get-VersionReportEligibleSites {
+    param (
+        [Parameter(Mandatory = $true)]
+        [string[]]$SiteUrls,
+
+        [Parameter(Mandatory = $false)]
+        [double]$MinSiteSizeMB = 0
+    )
+
+    if ($MinSiteSizeMB -le 0) {
+        Write-Host "Version report site-size filter disabled (MinSiteSizeforversionReports <= 0)." -ForegroundColor Yellow
+        Write-LogEntry -LogName $log -LogEntryText "Version report site-size filter disabled. Processing all $($SiteUrls.Count) sites." -LogLevel "INFO"
+        return [PSCustomObject]@{
+            EligibleSiteUrls = @($SiteUrls)
+            SkippedSites     = @()
+            UnknownSites     = @()
+        }
+    }
+
+    Write-Host "`nApplying version report site-size filter (StorageUsageCurrent >= $MinSiteSizeMB MB)..." -ForegroundColor Cyan
+    Write-LogEntry -LogName $log -LogEntryText "Applying version report site-size filter: StorageUsageCurrent >= $MinSiteSizeMB MB" -LogLevel "INFO"
+
+    $allSites = Get-PnPTenantSite -IncludeOneDriveSites
+    $siteByUrl = @{}
+    foreach ($tenantSite in $allSites) {
+        $normalizedUrl = $tenantSite.Url.TrimEnd('/').ToLowerInvariant()
+        $siteByUrl[$normalizedUrl] = $tenantSite
+    }
+
+    $eligible = [System.Collections.Generic.List[string]]::new()
+    $skipped  = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $unknown  = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($siteUrl in $SiteUrls) {
+        $cleanUrl = $siteUrl.TrimEnd('/')
+        $normalizedUrl = $cleanUrl.ToLowerInvariant()
+
+        if ($siteByUrl.ContainsKey($normalizedUrl)) {
+            $siteInfo = $siteByUrl[$normalizedUrl]
+            $storageUsageMB = [double]$siteInfo.StorageUsageCurrent
+            if ($storageUsageMB -ge $MinSiteSizeMB) {
+                $eligible.Add($cleanUrl)
+            }
+            else {
+                $skipped.Add([PSCustomObject]@{
+                    SiteUrl          = $cleanUrl
+                    StorageUsageMB   = [math]::Round($storageUsageMB, 2)
+                    MinimumSizeMB    = $MinSiteSizeMB
+                })
+            }
+        }
+        else {
+            # Keep unknown sites to avoid accidentally excluding valid targets when metadata lookup misses.
+            $eligible.Add($cleanUrl)
+            $unknown.Add($cleanUrl)
+        }
+    }
+
+    Write-Host "Eligible sites for version reports: $($eligible.Count)" -ForegroundColor Green
+    Write-Host "Skipped by size filter         : $($skipped.Count)" -ForegroundColor Yellow
+    if ($unknown.Count -gt 0) {
+        Write-Host "Included without size metadata : $($unknown.Count)" -ForegroundColor Yellow
+    }
+
+    Write-LogEntry -LogName $log -LogEntryText "Version report size filter results: Eligible=$($eligible.Count), Skipped=$($skipped.Count), UnknownIncluded=$($unknown.Count), ThresholdMB=$MinSiteSizeMB" -LogLevel "INFO"
+
+    return [PSCustomObject]@{
+        EligibleSiteUrls = @($eligible)
+        SkippedSites     = @($skipped)
+        UnknownSites     = @($unknown)
     }
 }
 
@@ -949,6 +1029,15 @@ function New-TenantVersionExpirationReport {
             return
         }
     }
+
+    $filteredSites = Get-VersionReportEligibleSites -SiteUrls $SiteUrls -MinSiteSizeMB $script:MinSiteSizeforversionReports
+    $SiteUrls = $filteredSites.EligibleSiteUrls
+
+    if ($SiteUrls.Count -eq 0) {
+        Write-Host "No sites meet the minimum size threshold ($($script:MinSiteSizeforversionReports) MB)." -ForegroundColor Yellow
+        Write-LogEntry -LogName $log -LogEntryText "No sites eligible for report generation after size filter. ThresholdMB=$($script:MinSiteSizeforversionReports)" -LogLevel "WARNING"
+        return
+    }
     
     Write-Host "`nStarting report generation for $($SiteUrls.Count) sites..." -ForegroundColor Yellow
     Write-LogEntry -LogName $log -LogEntryText "Starting report generation for $($SiteUrls.Count) sites" -LogLevel "INFO"
@@ -1060,6 +1149,14 @@ function Get-TenantVersionExpirationReportStatus {
             Write-Host "Operation cancelled by user." -ForegroundColor Yellow
             return
         }
+    }
+
+    $filteredSites = Get-VersionReportEligibleSites -SiteUrls $SiteUrls -MinSiteSizeMB $script:MinSiteSizeforversionReports
+    $SiteUrls = $filteredSites.EligibleSiteUrls
+    if ($SiteUrls.Count -eq 0) {
+        Write-Host "No sites meet the minimum size threshold ($($script:MinSiteSizeforversionReports) MB)." -ForegroundColor Yellow
+        Write-LogEntry -LogName $log -LogEntryText "No sites eligible for report status check after size filter. ThresholdMB=$($script:MinSiteSizeforversionReports)" -LogLevel "WARNING"
+        return
     }
 
     $results = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -1277,6 +1374,14 @@ function Invoke-TenantVersionWhatIfAnalysis {
         if ($null -eq $SiteUrls -or $SiteUrls.Count -eq 0) { Write-Host "No sites found. Operation cancelled." -ForegroundColor Red; return }
         $confirm = Read-Host "`nReady to process $($SiteUrls.Count) sites. Proceed? (Y/N)"
         if ($confirm -ne "Y" -and $confirm -ne "y") { Write-Host "Operation cancelled by user." -ForegroundColor Yellow; return }
+    }
+
+    $filteredSites = Get-VersionReportEligibleSites -SiteUrls $SiteUrls -MinSiteSizeMB $script:MinSiteSizeforversionReports
+    $SiteUrls = $filteredSites.EligibleSiteUrls
+    if ($SiteUrls.Count -eq 0) {
+        Write-Host "No sites meet the minimum size threshold ($($script:MinSiteSizeforversionReports) MB)." -ForegroundColor Yellow
+        Write-LogEntry -LogName $log -LogEntryText "No sites eligible for What-If analysis after size filter. ThresholdMB=$($script:MinSiteSizeforversionReports)" -LogLevel "WARNING"
+        return
     }
 
     # Choose policy mode
@@ -1928,6 +2033,8 @@ function Start-OperationsMenu {
             "9" {
                 Write-Host "Running: Generate version history report for all sites" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Generate version expiration report for all sites" -LogLevel "INFO"
+                Write-Host "Version report size threshold (MinSiteSizeforversionReports): $($script:MinSiteSizeforversionReports) MB" -ForegroundColor Cyan
+                Write-LogEntry -LogName $log -LogEntryText "Version report size threshold for option 9: $($script:MinSiteSizeforversionReports) MB" -LogLevel "INFO"
                 
                 New-TenantVersionExpirationReport -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
                 
@@ -1936,6 +2043,8 @@ function Start-OperationsMenu {
             "10" {
                 Write-Host "Running: Get version history report job status for all sites" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: Get version expiration report job status for all sites" -LogLevel "INFO"
+                Write-Host "Version report size threshold (MinSiteSizeforversionReports): $($script:MinSiteSizeforversionReports) MB" -ForegroundColor Cyan
+                Write-LogEntry -LogName $log -LogEntryText "Version report size threshold for option 10: $($script:MinSiteSizeforversionReports) MB" -LogLevel "INFO"
                 
                 Get-TenantVersionExpirationReportStatus -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
                 
@@ -1944,6 +2053,8 @@ function Start-OperationsMenu {
             "11" {
                 Write-Host "Running: What-If analysis - estimate storage recovery by version policy" -ForegroundColor Yellow
                 Write-LogEntry -LogName $log -LogEntryText "Starting operation: What-If analysis" -LogLevel "INFO"
+                Write-Host "Version report size threshold (MinSiteSizeforversionReports): $($script:MinSiteSizeforversionReports) MB" -ForegroundColor Cyan
+                Write-LogEntry -LogName $log -LogEntryText "Version report size threshold for option 11: $($script:MinSiteSizeforversionReports) MB" -LogLevel "INFO"
                 
                 Invoke-TenantVersionWhatIfAnalysis -SiteUrls $sites -ClientId $clientId -TenantId $tenantId
                 
