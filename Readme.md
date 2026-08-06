@@ -422,6 +422,10 @@ All site-level batch operations go through `Invoke-WithThrottlingHandling`, whic
 ## Authors
 
 - **Mike Lee**
-- **Luis DuSolier**
 
-*Script created: November 2025 | Last updated: July 2026*
+
+## Contributors: 
+- **Luis DuSolier**
+- **Joseph Vasil**
+
+*Script created: November 2025 | Last updated: August 2026*
