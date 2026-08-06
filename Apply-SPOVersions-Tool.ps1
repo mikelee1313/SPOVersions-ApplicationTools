@@ -129,7 +129,7 @@ $sitesFilePath = $null # Set to $null to auto-discover all sites
 
 # Version report scope configuration
 # StorageUsageCurrent is reported in MB. Set to 0 to include all sites in report generation and What-If analysis.
-$MinSiteSizeforversionReports = 100
+$MinSiteSizeforversionReports = 0
 
 #################section####################
 ############################################
