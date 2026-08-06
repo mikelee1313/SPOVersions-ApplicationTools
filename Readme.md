@@ -36,7 +36,6 @@ SharePoint Online version history can consume significant storage over time. Thi
 
 The script is entirely interactive — no parameters need to be passed at the command line. All configuration is done inside the script file itself.
 
-See:  https://learn.microsoft.com/en-us/sharepoint/plan-version-storage
 ---
 
 ## Prerequisites
@@ -106,6 +105,25 @@ https://contoso.sharepoint.com/sites/IT
 
 **Option 2 — Auto-discovery:** Set `$sitesFilePath = $null` and the script will prompt you to choose between SharePoint sites or OneDrive sites at runtime. System sites (search centres, app catalogs, redirect sites) are automatically excluded.
 
+### Version Report Scope Filter
+
+The script includes a dedicated size threshold for version report operations:
+
+```powershell
+# StorageUsageCurrent is in MB. Set to 0 to include all sites.
+$MinSiteSizeforversionReports = 100
+```
+
+This filter uses each site's `StorageUsageCurrent` value from tenant site metadata and applies only to:
+
+- **Option 9** (Generate version history report)
+- **Option 10** (Get version history report job status)
+- **Option 11** (What-If analysis)
+
+All other operations (for example version policy set/apply and batch delete jobs) still run against the full selected site scope.
+
+At runtime, options 9, 10, and 11 also display the active threshold before execution so you can confirm the current scope.
+
 ---
 
 ## Site Discovery Modes
@@ -171,11 +189,11 @@ Applies a version policy to every site collection using `Set-PnPSiteVersionPolic
   - **Major version limit** (minimum 100) — maximum number of major versions to retain.
   - **Expire after days** — optionally expire versions older than a specified number of days (minimum 30), or never.
 
+  Settings can be sourced from current **tenant-level defaults** or entered as custom values.
 
 The following image depicts the restore options and the storage use for each setting:
 <img width="3748" height="1845" alt="image" src="https://github.com/user-attachments/assets/e9efce2e-6516-4f2f-b366-9745fd6238be" />
 
-  Settings can be sourced from current **tenant-level defaults** or entered as custom values.
 
 #### Option 3 — Get Version Policy Status
 
@@ -224,7 +242,7 @@ Displays current tenant version policy settings (`Get-PnPTenant`) including the 
 
 #### Option 9 — Generate Version History Report for All Sites
 
-Submits an asynchronous version history report job (`New-PnPSiteFileVersionExpirationReportJob`) for each site collection. The report is a CSV file saved to a **dedicated document library** created automatically in each site:
+Submits an asynchronous version history report job (`New-PnPSiteFileVersionExpirationReportJob`) for each in-scope site collection. The in-scope list is filtered by `$MinSiteSizeforversionReports` (MB) using `StorageUsageCurrent`. The report is a CSV file saved to a **dedicated document library** created automatically in each site:
 
 ```
 Admin_SiteCollection_VersionReport_DONOTDELETE
@@ -246,9 +264,15 @@ Financesite_adminreport_donotdelete_VersionReport.csv
 
 > Report generation is asynchronous. The job is submitted and runs in the background. Use **Option 10** to check when it has completed before running **Option 11**.
 
+Before the job starts, the script prints the active threshold:
+
+`Version report size threshold (MinSiteSizeforversionReports): <value> MB`
+
 #### Option 10 — Get Version History Report Job Status
 
-Checks the status of the report generation job (`Get-PnPLibraryFileVersionExpirationReportJobStatus`) for each site using the same library and filename convention as Option 9.
+Checks the status of the report generation job (`Get-PnPSiteFileVersionExpirationReportJobStatus`) for each in-scope site using the same library and filename convention as Option 9.
+
+The same `$MinSiteSizeforversionReports` filter is applied so status checks run against the same site scope used for report generation.
 
 Displays per-site status (`completed`, `failed`, or in-progress) and at the end shows a summary:
 
@@ -271,6 +295,8 @@ Displays per-site status (`completed`, `failed`, or in-progress) and at the end 
 #### Option 11 — What-If Analysis
 
 Downloads the completed CSV reports from each site and calculates the projected storage savings if a specific version policy were applied — **without making any changes**. Based on the [Microsoft What-If tutorial](https://learn.microsoft.com/en-us/sharepoint/tutorial-run-what-if-analysis).
+
+The same `$MinSiteSizeforversionReports` filter is applied first, so analysis runs only for the same in-scope sites used by options 9 and 10.
 
 See the [What-If Analysis](#what-if-analysis) section for full details.
 
@@ -298,13 +324,14 @@ Reports are stored in a dedicated document library created in each site collecti
 ### How It Works
 
 1. Prompts you to select a version policy to simulate.
-2. Downloads the report CSV from each site's `Admin_SiteCollection_VersionReport_DONOTDELETE` library to a local temp folder.
-3. Expands the "compact" CSV format (where repeated field values are omitted for efficiency).
-4. Applies the chosen algorithm to set `TargetExpirationDate` on each version row.
-5. Sums the `Size` field for all rows that have a `TargetExpirationDate` set (versions that would be deleted).
-6. Displays per-site and aggregate results.
-7. Exports results to a CSV file for further analysis.
-8. Optionally cleans up the downloaded temp files.
+2. Applies the `$MinSiteSizeforversionReports` filter using `StorageUsageCurrent`.
+3. Downloads the report CSV from each in-scope site's `Admin_SiteCollection_VersionReport_DONOTDELETE` library to a local temp folder.
+4. Expands the "compact" CSV format (where repeated field values are omitted for efficiency).
+5. Applies the chosen algorithm to set `TargetExpirationDate` on each version row.
+6. Sums the `Size` field for all rows that have a `TargetExpirationDate` set (versions that would be deleted).
+7. Displays per-site and aggregate results.
+8. Exports results to a CSV file for further analysis.
+9. Optionally cleans up the downloaded temp files.
 
 ### Policy Options
 
